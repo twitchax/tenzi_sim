@@ -1,0 +1,19 @@
+[package]
+name = "tenzi_sim"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+debug = true
+
+[features]
+simd = []
+
+[dependencies]
+rayon = "1.10.0"
+rand = "0.8.5"
+clap = { version = "4.5.23", features = ["derive"] }
+colored = "2.2.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
