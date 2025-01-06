@@ -1,31 +1,35 @@
 #![feature(portable_simd)]
+#![feature(test)]
 
-use core::num;
-use std::{simd::{cmp::{SimdPartialEq, SimdPartialOrd}, num::SimdInt, Simd}, sync::{atomic::{AtomicUsize, Ordering}, OnceLock}};
+extern crate test;
+
+mod types;
+mod rand;
+mod mode;
+
+use std::{simd::{cmp::SimdPartialEq, Simd}, sync::{atomic::{AtomicUsize, Ordering}, OnceLock}};
 
 use clap::{arg, command, Parser};
 use colored::Colorize;
+use rand::roll;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
-
-type Num = usize;
-type AtomicNum = AtomicUsize;
-type Float = f64;
+use types::{AtomicNum, Float, Num};
 
 fn main() {
     let args = Args::parse();
 
     let num_sides = args.sides;
-    let num_die = args.dice;
+    let num_dice = args.dice;
     let num_simulations = args.simulations;
 
     let strategy = match args.strategy.as_str() {
-        "naive" => SimulationType::Naive(NaiveSimulation::new(num_sides, num_die)),
+        "naive" => SimulationType::Naive(NaiveSimulation::new(num_sides, num_dice)),
         "divide" => SimulationType::Divide(DivideSimulation),
         "merge" => SimulationType::Merge(MergeSimulation),
         _ => panic!("Invalid strategy"),
     };
 
-    println!("Running {} \"tenzi\" monte carlo simulations with {} {}-sided die, and strategy: `{}`.", num_simulations.to_string().cyan(), num_die.to_string().cyan(), num_sides.to_string().cyan(), args.strategy.to_string().cyan());
+    println!("Running {} \"tenzi\" monte carlo simulations with {} {}-sided die, and strategy: `{}`.", num_simulations.to_string().cyan(), num_dice.to_string().cyan(), num_sides.to_string().cyan(), args.strategy.to_string().cyan());
 
     let output = monte_carlo(strategy, num_simulations);
 
@@ -88,7 +92,7 @@ fn monte_carlo(strategy_type: SimulationType, num_simulations: Num) -> MonteCarl
     
     let average = (total_rolls as Float) / (num_simulations as Float);
     let variance = (total_squared_rolls as Float) / (num_simulations as Float) - (average * average as Float);
-    let std_dev = (variance as Float).sqrt();
+    let std_dev = variance.sqrt();
 
     let duration = start.elapsed();
 
@@ -116,7 +120,7 @@ fn sim(mut simulation_type: SimulationType) -> Num {
     num_rolls
 }
 
-/// The strategy helpers.
+// The strategy helpers.
 
 #[derive(Clone)]
 enum SimulationType {
@@ -228,12 +232,7 @@ impl Strategy for NaiveSimulation {
         let num_sides = self.num_sides();
         
         let mode = self.mode.unwrap_or_else(|| {
-            #[cfg(not(feature = "simd"))]
-            let mode = mutated_serial_mode(&mut self.dice);
-            #[cfg(feature = "simd")]
-            let mode = simd_mode(&mut self.dice, num_sides);
-
-            mode
+            mode::get_mode(&mut self.dice, num_sides)
         });
 
         self.mode = Some(mode);
@@ -289,66 +288,3 @@ impl Strategy for MergeSimulation {
         unimplemented!();
     }
 }
-
-// Helpers.
-
-fn roll(num_sides: Num) -> Num {
-    1 + (rand::random::<Num>() % num_sides)
-}
-
-fn serial_mode(dice: &[Num]) -> Num {
-    *dice.iter().max_by_key(|&x| dice.iter().filter(|&y| y == x).count()).unwrap()
-}
-
-fn mutated_serial_mode(dice: &mut [Num]) -> Num {
-    // Sort.
-    dice.sort_unstable();
-
-    // Find the mode.
-    let mut mode = dice[0];
-    let mut mode_count = 1;
-    let mut current = dice[0];
-    let mut current_count = 1;
-
-    for k in 1..dice.len() {
-        if dice[k] == current {
-            current_count += 1;
-        } else {
-            if current_count > mode_count {
-                mode = current;
-                mode_count = current_count;
-            }
-            current = dice[k];
-            current_count = 1;
-        }
-    }
-
-    if current_count > mode_count {
-        mode = current;
-    }
-
-    mode
-}
-
-fn simd_mode(dice: &[Num], num_sides: Num) -> Num {
-    let candidates = CANDIDATES.get_or_init(|| candidates(num_sides));
-
-    let target = std::simd::usizex64::load_or_default(dice);
-
-    let counts = candidates.iter().map(|candidate| {
-        let mask = target.simd_eq(*candidate);
-        mask.to_bitmask().count_ones()
-    }).collect::<Vec<_>>();
-
-    let mode = counts.iter().enumerate().max_by_key(|&(_, &count)| count).unwrap().0 + 1;
-
-    mode
-}
-
-fn candidates(num_sides: Num) -> Vec<Simd<usize, 64>> {
-    (1..num_sides + 1).map(|k| {
-        std::simd::usizex64::splat(k)
-    }).collect::<Vec<_>>()
-}
-
-static CANDIDATES: OnceLock<Vec<Simd<usize, 64>>> = OnceLock::new();
