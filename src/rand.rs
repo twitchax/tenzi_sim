@@ -6,20 +6,26 @@ pub fn roll(num_sides: Num) -> Num {
     1 + (get_num() % num_sides)
 }
 
-fn get_num() -> Num {
-    get_rng().gen::<Num>()
-}
-
 #[cfg(not(test))]
-fn get_rng() -> rand::rngs::ThreadRng {
-    rand::thread_rng()
+fn get_num() -> Num {
+    rand::thread_rng().gen::<Num>()
 }
 
 #[cfg(test)]
-fn get_rng() -> rand::rngs::StdRng {
-    use rand::SeedableRng;
+fn get_num() -> Num {
+    TEST_RNG.with_borrow_mut(|r| r.gen::<Num>())
+}
 
-    rand::rngs::StdRng::seed_from_u64(42)
+// #[cfg(test)]
+// static TEST_RNG: std::sync::LazyLock<std::sync::Mutex<rand::rngs::StdRng>> = std::sync::LazyLock::new(|| {
+//     use rand::SeedableRng;
+
+//     std::sync::Mutex::new(rand::rngs::StdRng::seed_from_u64(42))
+// });
+
+#[cfg(test)]
+thread_local! {
+    static TEST_RNG: std::cell::RefCell<rand::rngs::StdRng> = std::cell::RefCell::new(rand::SeedableRng::seed_from_u64(42));
 }
 
 #[cfg(test)]
@@ -46,10 +52,8 @@ mod tests {
     #[test]
     fn test_seed() {
         let num_sides = 1000;
-        let expected = 523;
-
-        let result = roll(num_sides);
-
-        assert_eq!(result, expected);
+        
+        assert_eq!(roll(num_sides), 523);
+        assert_eq!(roll(num_sides), 190);
     }
 }

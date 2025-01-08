@@ -1,4 +1,5 @@
 #![feature(portable_simd)]
+#![feature(once_cell_get_mut)]
 #![feature(test)]
 
 extern crate test;
@@ -6,13 +7,14 @@ extern crate test;
 mod types;
 mod rand;
 mod mode;
+mod simulation;
 
-use std::{simd::{cmp::SimdPartialEq, Simd}, sync::{atomic::{AtomicUsize, Ordering}, OnceLock}};
+use std::sync::atomic::Ordering;
 
 use clap::{arg, command, Parser};
 use colored::Colorize;
-use rand::roll;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use simulation::{DivideSimulation, MergeSimulation, NaiveSimulation, SimulationType};
 use types::{AtomicNum, Float, Num};
 
 fn main() {
@@ -24,8 +26,8 @@ fn main() {
 
     let strategy = match args.strategy.as_str() {
         "naive" => SimulationType::Naive(NaiveSimulation::new(num_sides, num_dice)),
-        "divide" => SimulationType::Divide(DivideSimulation),
-        "merge" => SimulationType::Merge(MergeSimulation),
+        "divide" => SimulationType::Divide(DivideSimulation::new(num_sides, num_dice)),
+        "merge" => SimulationType::Merge(MergeSimulation::new(num_sides, num_dice)),
         _ => panic!("Invalid strategy"),
     };
 
@@ -33,9 +35,11 @@ fn main() {
 
     let output = monte_carlo(strategy, num_simulations);
 
-    println!("Average rolls:      {:.8}.", output.average.to_string().green());
-    println!("Standard deviation: {:.8}.", output.std_dev.to_string().yellow());
-    println!("Duration:           {:.8}µs.", output.duration.as_micros().to_string().red());
+    println!("Average rolls:            {:.8}.", output.average_rolls.to_string().green());
+    println!("Standard deviation rolls: {:.8}.", output.std_dev_rolls.to_string().yellow());
+    println!("Average steps:            {:.8}.", output.average_steps.to_string().green());
+    println!("Standard deviation steps: {:.8}.", output.std_dev_steps.to_string().yellow());
+    println!("Duration:                 {:.8}µs.", output.duration.as_micros().to_string().red());
 }
 
 /// A monte carlo simulator for the game "tenzi".
@@ -65,8 +69,10 @@ struct Args {
 /// Contains the average number of rolls it took to achieve a "tenzi",
 /// and the standard deviation, and the clock time it took to run.
 struct MonteCarloOutput {
-    average: Float,
-    std_dev: Float,
+    average_rolls: Float,
+    std_dev_rolls: Float,
+    average_steps: Float,
+    std_dev_steps: Float,
     duration: std::time::Duration,
 }
 
@@ -76,215 +82,54 @@ struct MonteCarloOutput {
 fn monte_carlo(strategy_type: SimulationType, num_simulations: Num) -> MonteCarloOutput {
     let total_rolls = AtomicNum::new(0);
     let total_squared_rolls = AtomicNum::new(0);
+    let total_steps = AtomicNum::new(0);
+    let total_squared_steps = AtomicNum::new(0);
 
     let start = std::time::Instant::now();
 
     (0..num_simulations).into_par_iter().map(|_| {
-        let rolls = sim(strategy_type.clone());
-        (rolls, rolls * rolls)
-    }).for_each(|(rolls, squared_rolls)| {
+        let (rolls, steps) = sim(strategy_type.clone());
+        (rolls, rolls * rolls, steps, steps * steps)
+    }).for_each(|(rolls, squared_rolls, steps, squared_steps)| {
         total_rolls.fetch_add(rolls, Ordering::Relaxed);
         total_squared_rolls.fetch_add(squared_rolls, Ordering::Relaxed);
+        total_steps.fetch_add(steps, Ordering::Relaxed);
+        total_squared_steps.fetch_add(squared_steps, Ordering::Relaxed);
     });
 
     let total_rolls = total_rolls.load(Ordering::Relaxed);
     let total_squared_rolls = total_squared_rolls.load(Ordering::Relaxed);
+    let total_steps = total_steps.load(Ordering::Relaxed);
+    let total_squared_steps = total_squared_steps.load(Ordering::Relaxed);
     
-    let average = (total_rolls as Float) / (num_simulations as Float);
-    let variance = (total_squared_rolls as Float) / (num_simulations as Float) - (average * average as Float);
-    let std_dev = variance.sqrt();
+    let average_rolls = (total_rolls as Float) / (num_simulations as Float);
+    let variance_rolls = (total_squared_rolls as Float) / (num_simulations as Float) - (average_rolls * average_rolls as Float);
+    let std_dev_rolls = variance_rolls.sqrt();
+
+    let average_steps = (total_steps as Float) / (num_simulations as Float);
+    let variance_steps = (total_squared_steps as Float) / (num_simulations as Float) - (average_steps * average_steps as Float);
+    let std_dev_steps = variance_steps.sqrt();
+
 
     let duration = start.elapsed();
 
     MonteCarloOutput {
-        average,
-        std_dev,
+        average_rolls,
+        std_dev_rolls,
+        average_steps,
+        std_dev_steps,
         duration,
     }
 }
 
 /// Returns the number of rolls it took to achieve a "tenzi".
-fn sim(mut simulation_type: SimulationType) -> Num {
+fn sim(mut simulation_type: SimulationType) -> (Num, Num) {
     let strategy = simulation_type.as_strategy_mut();
 
-    let mut num_rolls = 0;
-
     while !strategy.done() {
-        // Make another roll, and add to the count.
-        num_rolls += strategy.roll();
-
         // Run a step.
         strategy.step();
     }
 
-    num_rolls
-}
-
-// The strategy helpers.
-
-#[derive(Clone)]
-enum SimulationType {
-    Naive(NaiveSimulation),
-    Divide(DivideSimulation),
-    Merge(MergeSimulation),
-}
-
-impl SimulationType {
-    fn as_strategy(&self) -> &dyn Strategy {
-        match self {
-            SimulationType::Naive(sim) => sim as &dyn Strategy,
-            SimulationType::Divide(sim) => sim as &dyn Strategy,
-            SimulationType::Merge(sim) => sim as &dyn Strategy,
-        }
-    }
-
-    fn as_strategy_mut(&mut self) -> &mut dyn Strategy {
-        match self {
-            SimulationType::Naive(sim) => sim as &mut dyn Strategy,
-            SimulationType::Divide(sim) => sim as &mut dyn Strategy,
-            SimulationType::Merge(sim) => sim as &mut dyn Strategy,
-        }
-    }
-}
-
-/// A simulation for the game "tenzi".
-trait Simulation: Send + Sync {
-    /// Returns a mutable reference to the dice.
-    fn dice(&mut self) -> &mut [Num];
-
-    /// Returns the number of sides on the die.
-    fn num_sides(&self) -> Num;
-
-    /// Returns whether or not a "tenzi" has been achieved.
-    fn done(&self) -> bool;
-
-    /// Rolls the dice, and returns the number rolled.
-    fn roll(&mut self) -> Num {
-        let num_sides = self.num_sides();
-        let mut num_rolls = 0;
-
-        for die in self.dice().iter_mut() {
-            if *die == 0 {
-                *die = roll(num_sides);
-                num_rolls += 1;
-            }
-        }
-
-        num_rolls
-    }
-}
-
-/// A simulation strategy for the game "tenzi".
-trait Strategy: Simulation {
-    /// Takes the rolls, and returns the indexes to re-roll.
-    /// Zeroes out the rolls that the strategy would like re-rolled.
-    /// The dice that are not zeroed out are the ones that are kept.
-    /// 
-    /// We use this method as it prevents unnecessary allocations just to keep track of which dice to re-roll.
-    fn step(&mut self);
-}
-
-/// Always keep the most from the first roll.
-#[derive(Clone)]
-struct NaiveSimulation {
-    dice: Vec<Num>,
-    num_sides: Num,
-    mode: Option<Num>,
-    done: bool,
-}
-
-impl NaiveSimulation {
-    fn new(num_sides: Num, num_dice: Num) -> Self {
-        Self {
-            dice: vec![0; num_dice],
-            num_sides,
-            mode: None,
-            done: false,
-        }
-    }
-}
-
-/// Keep the two most from the first roll.
-#[derive(Clone)]
-struct DivideSimulation;
-
-/// Only roll the group(s) with the lowest amount.
-#[derive(Clone)]
-struct MergeSimulation;
-
-impl Simulation for NaiveSimulation {
-    fn dice(&mut self) -> &mut [Num] {
-        &mut self.dice
-    }
-
-    fn num_sides(&self) -> Num {
-        self.num_sides
-    }
-
-    fn done(&self) -> bool {
-        self.done
-    }
-}
-
-impl Strategy for NaiveSimulation {
-    fn step(&mut self) {
-        #[allow(unused_variables)]
-        let num_sides = self.num_sides();
-        
-        let mode = self.mode.unwrap_or_else(|| {
-            mode::get_mode(&mut self.dice, num_sides)
-        });
-
-        self.mode = Some(mode);
-
-        let mut done = true;
-        for roll in self.dice.iter_mut() {
-            if *roll != mode {
-                *roll = 0;
-                done = false;
-            }
-        }
-
-        self.done = done;
-    }
-}
-
-impl Simulation for DivideSimulation {
-    fn dice(&mut self) -> &mut [Num] {
-        unimplemented!();
-    }
-
-    fn num_sides(&self) -> Num {
-        unimplemented!();
-    }
-
-    fn done(&self) -> bool {
-        unimplemented!();
-    }
-}
-
-impl Strategy for DivideSimulation {
-    fn step(&mut self) {
-        unimplemented!();
-    }
-}
-
-impl Simulation for MergeSimulation {
-    fn dice(&mut self) -> &mut [Num] {
-        unimplemented!();
-    }
-
-    fn num_sides(&self) -> Num {
-        unimplemented!();
-    }
-
-    fn done(&self) -> bool {
-        unimplemented!();
-    }
-}
-
-impl Strategy for MergeSimulation {
-    fn step(&mut self) {
-        unimplemented!();
-    }
+    (strategy.num_rolls(), strategy.num_steps())
 }
