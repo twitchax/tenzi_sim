@@ -16,13 +16,6 @@ fn get_num() -> Num {
     TEST_RNG.with_borrow_mut(|r| r.gen::<Num>())
 }
 
-// #[cfg(test)]
-// static TEST_RNG: std::sync::LazyLock<std::sync::Mutex<rand::rngs::StdRng>> = std::sync::LazyLock::new(|| {
-//     use rand::SeedableRng;
-
-//     std::sync::Mutex::new(rand::rngs::StdRng::seed_from_u64(42))
-// });
-
 #[cfg(test)]
 thread_local! {
     static TEST_RNG: std::cell::RefCell<rand::rngs::StdRng> = std::cell::RefCell::new(rand::SeedableRng::seed_from_u64(42));
